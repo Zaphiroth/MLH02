@@ -1,0 +1,427 @@
+---
+title: "MLH02"
+author: "Liu Zhe"
+date: "2022-10-17"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo = TRUE,
+  message = TRUE,
+  warning = FALSE
+)
+```
+
+# Environment Variables and Packages
+
+```{r}
+options(java.parameters = "-Xmx2048m",
+        stringsAsFactors = FALSE, 
+        encoding = 'UTF-8')
+
+suppressPackageStartupMessages({
+  # DM
+  library(zip)
+  library(openxlsx)
+  library(readxl)
+  library(writexl)
+  library(RcppRoll)
+  library(plyr)
+  library(stringi)
+  library(feather)
+  library(RODBC)
+  library(MASS)
+  library(car)
+  library(data.table)
+  library(lubridate)
+  library(plotly)
+  library(pROC)
+  library(tidymodels)
+  library(tidyverse)
+})
+```
+
+# Fishing
+
+```{r}
+fishing.raw <- read_xlsx('fishing .xlsx')
+
+head(fishing.raw)
+```
+
+将“是否钓到鱼”转换为factor类型
+
+```{r}
+fishing.score <- fishing.raw %>% 
+  select(set = `验证集`, is_fish = `是否钓到鱼`, 
+         score1 = `模型1预测值: 钓鱼`, score2 = `模型2预测值: 钓鱼`) %>% 
+  mutate(is_fish = as.factor(is_fish))
+```
+
+划分测试集和验证集
+
+```{r}
+fishing.train <- fishing.score[fishing.score$set == 1, ]
+fishing.test <- fishing.score[fishing.score$set == 2, ]
+```
+
+### PR曲线
+
+计算ROC
+
+```{r}
+fishing.train.roc1 <- roc(fishing.train$is_fish, fishing.train$score1)
+fishing.train.roc2 <- roc(fishing.train$is_fish, fishing.train$score2)
+fishing.test.roc1 <- roc(fishing.test$is_fish, fishing.test$score1)
+fishing.test.roc2 <- roc(fishing.test$is_fish, fishing.test$score2)
+```
+
+生成PR数据
+
+```{r}
+fishing.train.pr1 <- coords(fishing.train.roc1, 'all', 
+                            ret = c('recall', 'precision'), transpose = FALSE)
+fishing.train.pr2 <- coords(fishing.train.roc2, 'all', 
+                            ret = c('recall', 'precision'), transpose = FALSE)
+fishing.test.pr1 <- coords(fishing.test.roc1, 'all', 
+                           ret = c('recall', 'precision'), transpose = FALSE)
+fishing.test.pr2 <- coords(fishing.test.roc2, 'all', 
+                           ret = c('recall', 'precision'), transpose = FALSE)
+```
+
+训练集模型1的P-R曲线
+
+```{r}
+fishing.train.prcurve1 <- plot_ly(data = fishing.train.pr1, x = ~recall, y = ~precision, 
+                                  type = 'scatter', mode = 'lines', fill = 'tozeroy') %>% 
+  add_segments(x = 0, xend = 1, y = 0, yend = 1, 
+               line = list(dash = 'dash', color = 'black'), 
+               inherit = FALSE, showlegend = FALSE) %>% 
+  layout(title = paste0('PR Curve (AUC = ', round(fishing.train.roc1$auc, 2), ')'), 
+         xaxis = list(title = 'Recall'), yaxis = list(title = 'Precision'))
+
+fishing.train.prcurve1
+```
+
+训练集模型2的P-R曲线
+
+```{r}
+fishing.train.prcurve2 <- plot_ly(data = fishing.train.pr2, x = ~recall, y = ~precision, 
+                                  type = 'scatter', mode = 'lines', fill = 'tozeroy') %>% 
+  add_segments(x = 0, xend = 1, y = 0, yend = 1, 
+               line = list(dash = 'dash', color = 'black'), 
+               inherit = FALSE, showlegend = FALSE) %>% 
+  layout(title = paste0('PR Curve (AUC = ', round(fishing.train.roc2$auc, 2), ')'), 
+         xaxis = list(title = 'Recall'), yaxis = list(title = 'Precision'))
+
+fishing.train.prcurve2
+```
+
+测试集模型1的P-R曲线
+
+```{r}
+fishing.test.prcurve1 <- plot_ly(data = fishing.test.pr1, x = ~recall, y = ~precision, 
+                                 type = 'scatter', mode = 'lines', fill = 'tozeroy') %>% 
+  add_segments(x = 0, xend = 1, y = 0, yend = 1, 
+               line = list(dash = 'dash', color = 'black'), 
+               inherit = FALSE, showlegend = FALSE) %>% 
+  layout(title = paste0('PR Curve (AUC = ', round(fishing.test.roc1$auc, 2), ')'), 
+         xaxis = list(title = 'Recall'), yaxis = list(title = 'Precision'))
+
+fishing.test.prcurve1
+```
+
+测试集模型2的P-R曲线
+
+```{r}
+fishing.test.prcurve2 <- plot_ly(data = fishing.test.pr2, x = ~recall, y = ~precision, 
+                                 type = 'scatter', mode = 'lines', fill = 'tozeroy') %>% 
+  add_segments(x = 0, xend = 1, y = 0, yend = 1, 
+               line = list(dash = 'dash', color = 'black'), 
+               inherit = FALSE, showlegend = FALSE) %>% 
+  layout(title = paste0('PR Curve (AUC = ', round(fishing.test.roc2$auc, 2), ')'), 
+         xaxis = list(title = 'Recall'), yaxis = list(title = 'Precision'))
+
+fishing.test.prcurve2
+```
+
+### ROC曲线
+
+计算最佳阈值点
+
+```{r}
+fishing.train.cutoff1 <- coords(fishing.train.roc1, 'best', rec = 'threshold')
+fishing.train.cutoff2 <- coords(fishing.train.roc2, 'best', rec = 'threshold')
+fishing.test.cutoff1 <- coords(fishing.test.roc1, 'best', rec = 'threshold')
+fishing.test.cutoff2 <- coords(fishing.test.roc2, 'best', rec = 'threshold')
+```
+
+训练集模型1的ROC曲线
+
+```{r}
+fishing.train.roccurve1 <- plot_ly(x = 1 - fishing.train.roc1$specificities, 
+                                   y = fishing.train.roc1$sensitivities, 
+                                   type = 'scatter', mode = 'lines', fill = 'tozeroy', 
+                                   showlegend = FALSE) %>% 
+  add_markers(x = 1 - fishing.train.cutoff1$specificity, 
+              y = fishing.train.cutoff1$sensitivity, 
+              name = 'Best', inherit = FALSE, showlegend = TRUE) %>% 
+  add_segments(x = 0, xend = 1, y = 0, yend = 1, 
+               line = list(dash = 'dash', color = 'black'), 
+               inherit = FALSE, showlegend = FALSE) %>% 
+  layout(title = paste0('ROC Curve (AUC = ', round(fishing.train.roc1$auc, 2), ')'), 
+         xaxis = list(title = 'False Positive Rate'), 
+         yaxis = list(title = 'True Positive Rate'), 
+         showlegend = TRUE, legend = list(orientation = 'h'))
+
+fishing.train.roccurve1
+```
+
+训练集模型2的ROC曲线
+
+```{r}
+fishing.train.roccurve2 <- plot_ly(x = 1 - fishing.train.roc2$specificities, 
+                                   y = fishing.train.roc2$sensitivities, 
+                                   type = 'scatter', mode = 'lines', fill = 'tozeroy', 
+                                   showlegend = FALSE) %>% 
+  add_markers(x = 1 - fishing.train.cutoff2$specificity, 
+              y = fishing.train.cutoff2$sensitivity, 
+              name = 'Best', inherit = FALSE, showlegend = TRUE) %>% 
+  add_segments(x = 0, xend = 1, y = 0, yend = 1, 
+               line = list(dash = 'dash', color = 'black'), 
+               inherit = FALSE, showlegend = FALSE) %>% 
+  layout(title = paste0('ROC Curve (AUC = ', round(fishing.train.roc2$auc, 2), ')'), 
+         xaxis = list(title = 'False Positive Rate'), 
+         yaxis = list(title = 'True Positive Rate'), 
+         showlegend = TRUE, legend = list(orientation = 'h'))
+
+fishing.train.roccurve2
+```
+
+模型1的最佳阈值
+
+```{r}
+fishing.test.cutoff1
+```
+
+测试集模型1的ROC曲线
+
+```{r}
+fishing.test.roccurve1 <- plot_ly(x = 1 - fishing.test.roc1$specificities, 
+                                  y = fishing.test.roc1$sensitivities, 
+                                  type = 'scatter', mode = 'lines', fill = 'tozeroy', 
+                                  showlegend = FALSE) %>% 
+  add_markers(x = 1 - fishing.test.cutoff1$specificity, 
+              y = fishing.test.cutoff1$sensitivity, 
+              name = 'Best', inherit = FALSE, showlegend = TRUE) %>% 
+  add_segments(x = 0, xend = 1, y = 0, yend = 1, 
+               line = list(dash = 'dash', color = 'black'), 
+               inherit = FALSE, showlegend = FALSE) %>% 
+  layout(title = paste0('ROC Curve (AUC = ', round(fishing.test.roc1$auc, 2), ')'), 
+         xaxis = list(title = 'False Positive Rate'), 
+         yaxis = list(title = 'True Positive Rate'), 
+         showlegend = TRUE, legend = list(orientation = 'h'))
+
+fishing.test.roccurve1
+```
+
+模型2的最佳阈值
+
+```{r}
+fishing.test.cutoff2
+```
+
+测试集模型2的ROC曲线
+
+```{r}
+fishing.test.roccurve2 <- plot_ly(x = 1 - fishing.test.roc2$specificities, 
+                                  y = fishing.test.roc2$sensitivities, 
+                                  type = 'scatter', mode = 'lines', fill = 'tozeroy', 
+                                  showlegend = FALSE) %>% 
+  add_markers(x = 1 - fishing.test.cutoff2$specificity, 
+              y = fishing.test.cutoff2$sensitivity, 
+              name = 'Best', inherit = FALSE, showlegend = TRUE) %>% 
+  add_segments(x = 0, xend = 1, y = 0, yend = 1, 
+               line = list(dash = 'dash', color = 'black'), 
+               inherit = FALSE, showlegend = FALSE) %>% 
+  layout(title = paste0('ROC Curve (AUC = ', round(fishing.test.roc2$auc, 2), ')'), 
+         xaxis = list(title = 'False Positive Rate'), 
+         yaxis = list(title = 'True Positive Rate'), 
+         showlegend = TRUE, legend = list(orientation = 'h'))
+
+fishing.test.roccurve2
+```
+
+从AUC来看，模型1更优。最佳阈值的选取依据Youden指数sensitivity+specificity-1，Youden指数越大，选取的阈值越好。
+
+### 混淆矩阵
+
+根据最佳阈值预测结果，并生成混淆矩阵。
+
+训练集模型1和模型2的混淆矩阵
+
+```{r}
+fishing.train.pred <- fishing.train %>% 
+  mutate(pred1 = ifelse(score1 > fishing.train.cutoff1$threshold, 1, 0), 
+         pred1 = as.factor(pred1), 
+         pred2 = ifelse(score2 > fishing.train.cutoff2$threshold, 1, 0), 
+         pred2 = as.factor(pred2))
+
+fishing.train.conf1 <- conf_mat(fishing.train.pred, is_fish, pred1)
+fishing.train.conf2 <- conf_mat(fishing.train.pred, is_fish, pred2)
+
+fishing.train.conf1
+fishing.train.conf2
+```
+
+测试集模型1和模型2的混淆矩阵
+
+```{r}
+fishing.test.pred <- fishing.test %>% 
+  mutate(pred1 = ifelse(score1 > fishing.test.cutoff1$threshold, 1, 0), 
+         pred1 = as.factor(pred1), 
+         pred2 = ifelse(score2 > fishing.test.cutoff2$threshold, 1, 0), 
+         pred2 = as.factor(pred2))
+
+fishing.test.conf1 <- conf_mat(fishing.test.pred, is_fish, pred1)
+fishing.test.conf2 <- conf_mat(fishing.test.pred, is_fish, pred2)
+
+fishing.test.conf1
+fishing.test.conf2
+```
+
+# 似然比
+
+读取数据
+
+```{r}
+ink.raw <- read_table('inks5_CLASSdataset.txt', show_col_types = FALSE) %>% 
+  arrange(Itemtype, Name, Piece)
+
+ink.train1 <- ink.raw %>% 
+  filter(Itemtype == 'TRAIN', stri_sub(Name, -2, -1) != '.1') %>% 
+  mutate(label = stri_sub(Name, -1, -1)) %>% 
+  select(label, x, y, z)
+
+ink.train2 <- ink.raw %>% 
+  filter(Itemtype == 'TRAIN', stri_sub(Name, -2, -1) == '.1') %>% 
+  mutate(label = stri_sub(Name, -3, -3)) %>% 
+  select(label, x, y, z)
+
+ink.train <- bind_rows(ink.train1, ink.train2)
+
+ink.test <- ink.raw %>% 
+  filter(Itemtype == 'TEST') %>% 
+  mutate(label = stri_sub(Name, -1, -1)) %>% 
+  select(label, x, y, z)
+
+# load('Ink_RF.RData')
+```
+
+计算LR的函数
+
+```{r}
+LRFunc <- function(train, test) {
+  # y
+  y1.bar <- train %>% 
+    group_by(label) %>% 
+    summarise_all(mean) %>% 
+    ungroup()
+  
+  y2.bar <- test %>% 
+    group_by(label) %>% 
+    summarise_all(mean) %>% 
+    ungroup()
+  
+  y.bar <- bind_rows(train, test) %>% 
+    group_by(label) %>% 
+    summarise_all(mean) %>% 
+    ungroup()
+  
+  # x
+  x1.bar <- y1.bar %>% 
+    pivot_longer(cols = names(y1.bar)[names(y1.bar) != 'label'], 
+                 names_to = 'var', 
+                 values_to = 'bar')
+  
+  x.bar <- train %>% 
+    pivot_longer(cols = names(train)[names(train) != 'label'], 
+                 names_to = 'var', 
+                 values_to = 'value') %>% 
+    group_by(var) %>% 
+    summarise(barbar = mean(value)) %>% 
+    ungroup()
+  
+  # Sw
+  x.scale <- train %>% 
+    group_by(label) %>% 
+    mutate(no = row_number()) %>% 
+    ungroup() %>% 
+    pivot_longer(cols = names(train)[names(train) != 'label'], 
+                 names_to = 'var', 
+                 values_to = 'value') %>% 
+    left_join(x1.bar, by = c('label', 'var')) %>% 
+    mutate(value = value - bar) %>% 
+    pivot_wider(id_cols = c('label', 'no'), 
+                names_from = 'var', 
+                values_from = 'value') %>% 
+    select(-label, -no) %>% 
+    as.matrix()
+  
+  s.w <- 0
+  for (i in 1: nrow(x.scale)) {
+    s.w <- s.w + (x.scale[i, ] %*% t(x.scale[i, ]))
+  }
+  
+  # Sa
+  x.bar.scale <- x1.bar %>% 
+    left_join(x.bar, by = 'var') %>% 
+    mutate(bar = bar - barbar) %>% 
+    pivot_wider(id_cols = 'label', 
+                names_from = 'var', 
+                values_from = 'bar') %>% 
+    select(-label) %>% 
+    as.matrix()
+  
+  s.a <- 0
+  for (i in 1: nrow(x.bar.scale)) {
+    s.a <- s.a + (x.bar.scale[i, ] %*% t(x.bar.scale[i, ]))
+  }
+  
+  # n
+  p <- ncol(y.bar) - 1
+  m <- nrow(y.bar)
+  n1 <- table(train$label)[1]
+  n2 <- table(test$label)[1]
+  
+  # U
+  u.hat <- s.w / (m * (n1 - 1))
+  
+  # C
+  c.hat <- s.a / (m - 1) - u.hat / n1
+  
+  # LR
+  y1.m <- t(as.matrix(y1.bar[-1]))
+  y2.m <- t(as.matrix(y2.bar[-1]))
+  y.m <- t(as.matrix(y.bar[-1]))
+  x.m <- as.matrix(x.bar[-1])
+  
+  lr <- c()
+  for (i in 1: m) {
+    l1 <- (2 * pi) ^ (-p) * det(u.hat / n1 + u.hat / n2) ^ (-0.5) * exp(-0.5 * t(y1.m[, i] - y2.m[, i]) %*% solve(u.hat / n1 + u.hat / n2) %*% (y1.m[, i] - y2.m[, i])) * abs(det(u.hat / (n1 + n2) + c.hat)) ^ (-0.5) * exp(-0.5 * t(y.m[, i] - x.m) %*% solve(u.hat / (n1 + n2) + c.hat) %*% (y.m[, i] - x.m))
+    
+    l2 <- (2 * pi) ^ (-p) * det(u.hat / n1 + c.hat) ^ (-0.5) * exp(-0.5 * t(y1.m[, i] - x.m) %*% solve(u.hat / n1 + c.hat) %*% (y1.m[, i] - x.m)) * det(u.hat / n2 + c.hat) ^ (-0.5) * exp(-0.5 * t(y2.m[, i] - x.m) %*% solve(u.hat / n2 + c.hat) %*% (y2.m[, i] - x.m))
+    
+    lr[i] <- l1 / l2
+  }
+  
+  return(lr)
+}
+```
+
+计算墨迹数据的LR
+
+```{r}
+LRFunc(train = ink.train, test = ink.test)
+```
